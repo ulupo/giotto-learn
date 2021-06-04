@@ -1,18 +1,14 @@
-"""Graph geodesic distance calculations."""
+"""Net-flow calculations."""
 # License: GNU AGPLv3
 
 from functools import reduce
 from operator import and_
-from warnings import warn
 
 import numpy as np
 from joblib import Parallel, delayed
-from numpy.ma import masked_invalid
-from numpy.ma.core import MaskedArray
-from scipy.sparse import issparse, isspmatrix_csr
-from scipy.sparse.csgraph import shortest_path
+from scipy.sparse.csgraph import laplacian
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import check_is_fitted, check_symmetric
 
 from ..base import PlotterMixin
 from ..plotting import plot_heatmap
@@ -20,14 +16,46 @@ from ..utils._docs import adapt_fit_transform_docs
 from ..utils.validation import check_graph
 
 
+def _check_connected(G):
+    raise NotImplementedError
+
+
+def net_flow(G, efficiency="speed"):
+    _check_connected(G)
+
+    # TODO remove if directed impl added
+    check_symmetric(G)
+    L = laplacian(G)
+    C = np.zeros(L.shape)
+    C[1:, 1:] = np.linalg.inv(L[1:, 1:])
+
+    N = max(G.shape)
+    E = G.number_of_edges()
+    B = nx.incidence_matrix(G, oriented=True).T  # shape=(nodes,edges)
+
+    if efficiency == "speed":
+        F = B @ C
+        F_ranks = np.apply_along_axis(rankdata, arr=F, axis=1)
+        values = np.sum((2 * F_ranks - 1 - N) * F, axis=1)
+    elif efficiency == "memory":
+        values = np.zeros(G.number_of_edges())
+        for idx, B_row in enumerate(B):
+            F_row = B_row@C
+            rank = rankdata(F_row)
+            values[idx] = np.sum((2 * rank - 1 - N) * F_row)
+    else:
+        raise Exception("Efficiency unknown.")
+
+    edge_dict = dict(zip(G.edges, values))
+    return edge_dict
+
+
 @adapt_fit_transform_docs
-class GraphGeodesicDistance(BaseEstimator, TransformerMixin, PlotterMixin):
-    """Distance matrices arising from geodesic distances on graphs.
+class NetFlow(BaseEstimator, TransformerMixin, PlotterMixin):
+    """Weighted graphs constructed ...
 
     For each (possibly weighted and/or directed) graph in a collection, this
-    transformer calculates the length of the shortest (directed or undirected)
-    path between any two of its vertices, setting it to ``numpy.inf`` when two
-    vertices cannot be connected by a path.
+    transformer calculates ???.
 
     The graphs are represented by their adjacency matrices which can be dense
     arrays, sparse matrices or masked arrays. The following rules apply:
@@ -50,75 +78,33 @@ class GraphGeodesicDistance(BaseEstimator, TransformerMixin, PlotterMixin):
         If ``True`` (default), then find the shortest path on a directed graph.
         If ``False``, then find the shortest path on an undirected graph.
 
-    unweighted : bool, optional, default: ``False``
-        If ``True``, then find unweighted distances. That is, rather than
-        finding the path between each point such that the sum of weights is
-        minimized, find the path such that the number of edges is minimized.
+    weighted : bool
 
-    method : ``'auto'`` | ``'FW'`` | ``'D'`` | ``'BF'`` | ``'J'``, optional, \
-        default: ``'auto'``
-        Algorithm to use for shortest paths. See the scipy documentation \
-        <https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.\
-        csgraph.shortest_path.html>`_.
+    method : ``"speed"`` | ``"memory"``, optional, default: ``"speed"``
+        Algorithm to use. See ?.
 
     Examples
     --------
     >>> import numpy as np
     >>> from gtda.graphs import TransitionGraph, GraphGeodesicDistance
     >>> X = np.arange(4).reshape(1, -1, 1)
-    >>> X_tg = TransitionGraph(func=None).fit_transform(X)
+    >>> X_tg = NetFlow().fit_transform(X)
     >>> print(X_tg[0].toarray())
     [[0 1 0 0]
      [0 0 1 0]
      [0 0 0 1]
      [0 0 0 0]]
-    >>> X_ggd = GraphGeodesicDistance(directed=False).fit_transform(X_tg)
-    >>> print(X_ggd[0])
-    [[0. 1. 2. 3.]
-     [1. 0. 1. 2.]
-     [2. 1. 0. 1.]
-     [3. 2. 1. 0.]]
 
     See also
     --------
-    TransitionGraph, KNeighborsGraph
+    GraphGeodesicDistance, TransitionGraph, KNeighborsGraph
 
     """
 
-    def __init__(self, n_jobs=None, directed=False, unweighted=False,
-                 method='auto'):
+    def __init__(self, n_jobs=None, directed=False, method="speed"):
         self.n_jobs = n_jobs
         self.directed = directed
-        self.unweighted = unweighted
         self.method = method
-
-    def _geodesic_distance(self, X, i=None):
-        method_ = self.method
-        if not issparse(X):
-            diag = np.eye(X.shape[0], dtype=bool)
-            if np.any(~np.logical_or(X, diag)):
-                if self.method in ['auto', 'FW']:
-                    if np.any(X < 0):
-                        method_ = 'J'
-                    else:
-                        method_ = 'D'
-                    warn(
-                        f"Methods 'auto' and 'FW' are not supported when "
-                        f"some edge weights are zero. Using '{method_}' "
-                        f"instead for graph {i}."
-                        )
-            if not isinstance(X, MaskedArray):
-                # Convert to a masked array with mask given by positions in
-                # which infs or NaNs occur.
-                if X.dtype != bool:
-                    X = masked_invalid(X)
-        elif X.shape[0] != X.shape[1]:
-            n_vertices = max(X.shape)
-            X = X.copy() if isspmatrix_csr(X) else X.tocsr()
-            X.resize(n_vertices, n_vertices)
-
-        return shortest_path(X, directed=self.directed,
-                             unweighted=self.unweighted, method=method_)
 
     def fit(self, X, y=None):
         """Do nothing and return the estimator unchanged.
@@ -148,8 +134,7 @@ class GraphGeodesicDistance(BaseEstimator, TransformerMixin, PlotterMixin):
         return self
 
     def transform(self, X, y=None):
-        """Compute the lengths of graph shortest paths between any two
-        vertices.
+        """Compute ?.
 
         Parameters
         ----------
@@ -173,9 +158,7 @@ class GraphGeodesicDistance(BaseEstimator, TransformerMixin, PlotterMixin):
         check_is_fitted(self, '_is_fitted')
         X = check_graph(X)
 
-        Xt = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._geodesic_distance)(x, i=i) for i, x in enumerate(X)
-            )
+        Xt = Parallel(n_jobs=self.n_jobs)(delayed(net_flow)(x) for x in X)
 
         x0_shape = Xt[0].shape
         if reduce(and_, (x.shape == x0_shape for x in Xt), True):
